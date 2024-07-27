@@ -1,0 +1,12 @@
+
+sample=${1}
+reference="../GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna"
+#panel="../24_snp_panel.bed"
+panel="../huang_snps.bed"
+bam=${sample}.recalibrated.bam
+vcf=${sample}.snp.vcf.gz
+filteredVcf=${sample}.snp.filtered.vcf.gz
+
+bcftools mpileup -Ou -f $reference -R $panel $bam | bcftools call -m -Ob -o 22.$vcf
+
+bcftools filter -e 'QUAL<10 || DP<4' -Oz -o 22.$filteredVcf 22.$vcf
