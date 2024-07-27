@@ -1,0 +1,81 @@
+#$ -N REALIGNMENT_GRCH38
+#$ -V
+#$ -cwd
+#$ -pe smp 32
+#$ -M luke.ogorman@radboudumc.nl
+#$ -o /home/lukeog/logs/
+#$ -e /home/lukeog/logs/
+#$ -q all.q@narrativum.umcn.nl
+
+sampleID="${1}"
+fq1="${sampleID}_1.fq"
+fq2="${sampleID}_2.fq"
+
+reference="/home/lukeog/Symlinks/xomics/Purva_WES_Data/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna"
+omni="/mnt/rtc/pipelines/references/GATKResources/1000G_omni2.5.hg38.vcf.gz"
+
+tool1="/mnt/rtc/pipelines/tools/bwa/"
+tool2="/opt/cmbi/bin/"
+picard="/mnt/rtc/pipelines/tools/picard-2.27.5/picard.jar"
+gatk="/opt/cmbi/gatk-4.0.10.0/gatk"
+
+export PATH=$tool1:$tool2:$PATH
+
+mkdir -p tmp/
+TMP_DIR=`pwd`/tmp
+
+export REF_PATH=`pwd`/
+
+# CRAM to BAM to FastQ (Samtools method did not make unique corresponding PE readnames)
+samtools view -@ 32 -T ../hs_ref_GRCh37.p5_all_contigs.fa -b -o ${1}_recalibrated.bam ${1}_recalibrated.cram
+samtools sort -n -o ${1}_recalibrated.sorted.bam ${1}_recalibrated.bam
+bedtools bamtofastq -i ${1}_recalibrated.sorted.bam \
+                      -fq ${1}_1.fq \
+                      -fq2 ${1}_2.fq
+
+# Alignment
+bwa mem \
+	-t 32 \
+	-M \
+	-R '@RG\tID:'$sampleID'_1\tSM:'$sampleID'\tPL:ILLUMINA\tLB:Library' \
+	$reference \
+	$fq1 $fq2 \
+	> "$sampleID"_aligned.sam
+
+# read pairs from a bam file (-b) that map with mapQ≥30 including the bam file header (-h). 
+# -f 0x2 option corresponds to the bitwise flags that specify that reads need to be properly paired
+# Neccessary to prevent issues with picard duplicate read names
+samtools view -@ 32 -q 10 -f 0x2 -bS "$sampleID"_aligned.sam > "$sampleID"_aligned.bam
+
+java -Xmx2g -Djava.io.tmpdir=`pwd`/tmp -jar $picard SortSam \
+      I="$sampleID"_aligned.bam \
+      O="$sampleID"_aligned_sorted.bam \
+      SORT_ORDER=coordinate
+
+java -Xmx2g -Djava.io.tmpdir=`pwd`/tmp -jar $picard MarkDuplicates \
+	USE_JDK_DEFLATER=true \
+	USE_JDK_INFLATER=true \
+	INPUT="$sampleID"_aligned_sorted.bam \
+	OUTPUT="$sampleID".DelDup.bam \
+	METRICS_FILE=metrics.txt
+
+samtools index "$sampleID".DelDup.bam
+
+python $gatk BaseRecalibrator \
+	--tmp-dir $TMP_DIR \
+        -I "$sampleID".DelDup.bam \
+	-R $reference \
+	--known-sites $omni \
+	-O recal_data.table
+
+python $gatk ApplyBQSR \
+	-R $reference \
+	-I "$sampleID".DelDup.bam \
+	--bqsr-recal-file recal_data.table \
+	-O "$sampleID".recalibrated.bam
+
+samtools index "$sampleID".recalibrated.bam
+
+#rm *aligned.sam *sorted*bam* *aligned.bam* *recalibrated.bai
+#rm *aligned.sam\n
+#rm *aligned.sam
